@@ -57,6 +57,30 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+  # Both images come from one Dockerfile with a target each. Building them here
+  # means a broken Dockerfile fails on the PR rather than on a release tag,
+  # which is the first time the release workflow would otherwise run it.
+  images:
+    name: Images build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [api, web]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Native amd64 only, and no push: this is a build check, not a release.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          push: false
+          cache-from: type=gha,scope=ci-${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=ci-${{ matrix.target }}
+
   compose:
     name: Compose stack validates
     runs-on: ubuntu-latest
