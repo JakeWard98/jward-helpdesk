@@ -7,19 +7,33 @@ have it land on the right ticket.
 Runs as a Portainer stack behind Nginx Proxy Manager, which sits behind a
 Cloudflare tunnel. Nothing is published on a host port.
 
-```
-  browser ──▶ Cloudflare ──▶ cloudflared ──▶ Nginx Proxy Manager
-                                                     │
-                                                     ▼
-                                          ┌──────────────┐        ┌──────────────┐
-                                          │ web (nginx)  │───────▶│ api (FastAPI)│
-                                          │ SPA + /api   │        └──────┬───────┘
-                                          └──────────────┘               │
-                                                                         ▼
-                   ┌──────────────┐                              ┌──────────────┐
-  Proton  ◀───────▶│ worker       │─────────────────────────────▶│ db (Postgres)│
-  SMTP / Bridge    │ mail in/out  │                              └──────────────┘
-                   └──────────────┘
+## Architecture
+
+```mermaid
+flowchart TB
+    Browser["Browser<br/>agent GUI · requester portal"]
+    CF["Cloudflare tunnel<br/>cloudflared"]
+    NPM["Nginx Proxy Manager"]
+    Mail{{"Proton<br/>SMTP submission · Bridge IMAP"}}
+
+    subgraph stack["Portainer stack"]
+        direction TB
+        Web["web (nginx)<br/>SPA + /api proxy"]
+        API["api (FastAPI)<br/>sessions · tickets · sanitising"]
+        Worker["worker<br/>mail in and out"]
+        DB[("db (Postgres 16)")]
+        Files[("attachments<br/>/data/attachments")]
+    end
+
+    Browser --> CF
+    CF --> NPM
+    NPM -- "helpdesk-web:8080" --> Web
+    Web -- "/api" --> API
+    API -- "tickets · outbound_emails queue" --> DB
+    API --> Files
+    Worker -- "polls the queue" --> DB
+    Worker --> Files
+    Worker <-- "the only container with egress" --> Mail
 ```
 
 ## What it does
