@@ -84,6 +84,17 @@ flowchart TB
    done
    ```
 
+   ```powershell
+   # Windows / PowerShell
+   foreach ($name in 'APP_SECRET', 'POSTGRES_PASSWORD') {
+       # 32 cryptographically random bytes -> 64 hex chars, same as `openssl rand -hex 32`.
+       # Get-Random is not a CSPRNG, so do not substitute it here.
+       $bytes = [byte[]]::new(32)
+       [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+       "$name=" + (($bytes | ForEach-Object { $_.ToString('x2') }) -join '')
+   }
+   ```
+
 3. Deploy. On first boot the API creates the schema, seeds the default
    templates, and creates the admin from `BOOTSTRAP_ADMIN_EMAIL` /
    `BOOTSTRAP_ADMIN_PASSWORD`.
