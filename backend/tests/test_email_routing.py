@@ -313,3 +313,22 @@ def test_mail_without_a_sender_is_ignored(db: Session, templates: None, missing_
 
     assert parse_email(raw).from_email == ""
     assert email_inbound.ingest(db, raw).outcome == "ignored"
+
+
+def test_reply_moves_a_pending_ticket_back_to_open(db: Session, templates: None):
+    first = email_inbound.ingest(db, build_mail())
+    db.commit()
+    ticket = db.get(Ticket, first.ticket_id)
+    ticket_service.set_status(db, ticket, "pending")
+    db.commit()
+
+    reply_address = mail_tokens.reply_address(
+        "helpdesk@test.invalid", ticket.number, ticket.reply_token
+    )
+    email_inbound.ingest(
+        db, build_mail(to=reply_address, message_id="<nudge@example.org>")
+    )
+    db.commit()
+
+    db.refresh(ticket)
+    assert ticket.status == "open"

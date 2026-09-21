@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from email_validator import EmailNotValidError, validate_email
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -33,6 +34,14 @@ def ensure_bootstrap_admin(db: Session) -> None:
             "no admin account exists and BOOTSTRAP_ADMIN_EMAIL/PASSWORD are unset - "
             "set them and restart to create the first login"
         )
+        return
+
+    # Validate here rather than at first login: an address the API would later
+    # reject would otherwise create an admin who cannot sign in.
+    try:
+        email = validate_email(email, check_deliverability=False).normalized.lower()
+    except EmailNotValidError as exc:
+        log.error("refusing to create the bootstrap admin: BOOTSTRAP_ADMIN_EMAIL %s", exc)
         return
 
     problems = passwords.password_problems(password, email=email)

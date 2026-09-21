@@ -150,8 +150,10 @@ def add_message(
     ticket.last_activity_at = datetime.now(UTC)
     if kind == "outbound" and ticket.first_response_at is None:
         ticket.first_response_at = ticket.last_activity_at
-    # A customer reply reopens a resolved ticket; agents close it again when done.
-    if kind == "inbound" and ticket.status in ("resolved", "closed"):
+    # A customer reply puts the ball back in the agents' court: it reopens a
+    # resolved or closed ticket, and moves one that was waiting on the customer
+    # ("pending") back to "open".
+    if kind == "inbound" and ticket.status in ("resolved", "closed", "pending"):
         ticket.status = "open"
         ticket.resolved_at = None
         ticket.closed_at = None
