@@ -1,0 +1,110 @@
+name: Release images
+
+# Publishes the two runtime images to GHCR whenever a version tag is pushed:
+#
+#   git tag -a v1.2.3 -m "v1.2.3" && git push origin v1.2.3
+#
+# Produces ghcr.io/<owner>/jward-helpdesk-api and .../jward-helpdesk-web,
+# tagged 1.2.3, 1.2, 1 and (for non-prerelease tags) latest. A prerelease tag
+# such as v1.3.0-rc1 publishes 1.3.0-rc1 only - see the README for the table.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag to (re)build, e.g. v1.2.3'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # Needed to sign the build provenance attestation.
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The api and worker containers share one image; compose picks the
+          # role with HELPDESK_ROLE and the worker overrides the command.
+          - image: jward-helpdesk-api
+            context: backend
+          - image: jward-helpdesk-web
+            context: frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # workflow_dispatch builds the tag it was given, not the branch the
+          # run was started from, so a rebuild is always reproducible.
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      # GHCR namespaces are lower case; the owner login may not be.
+      - name: Resolve image name
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.name.outputs.image }}
+          # A manual rebuild publishes the exact version only. The floating
+          # tags move on a tag push alone, so re-running an older tag can never
+          # drag latest/1.2/1 backwards onto it.
+          tags: |
+            type=semver,pattern={{version}},value=${{ inputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }},enable=${{ github.event_name == 'push' }}
+            type=semver,pattern={{major}},value=${{ inputs.tag }},enable=${{ github.event_name == 'push' }}
+          # "latest" only for a final release - a -rc tag must never become the
+          # tag a deployment follows by default.
+          flavor: |
+            latest=${{ github.event_name == 'push' && 'auto' || 'false' }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.name.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

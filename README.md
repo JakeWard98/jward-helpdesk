@@ -121,6 +121,69 @@ uvicorn app.main:app --reload
 and a non-Secure cookie) and mounts the API docs at `/api/docs`. Never run a
 tunnelled deployment with it.
 
+## Docker images
+
+Published to GitHub Container Registry with `linux/amd64` and `linux/arm64`
+support. Two images cover the three application services — `api` and `worker`
+share one image and differ only by `HELPDESK_ROLE` and the command:
+
+```bash
+docker pull ghcr.io/jakeward98/jward-helpdesk-api:latest   # api + worker
+docker pull ghcr.io/jakeward98/jward-helpdesk-web:latest   # web
+```
+
+The `attachments` volume (`/data/attachments`, shared by `api` and `worker`)
+holds every uploaded and received attachment, and `db-data` holds Postgres.
+Back both up before upgrading — see
+[docs/deployment.md](docs/deployment.md#backups).
+
+### Tags
+
+Images are built by [`.github/workflows/release.yml`](.github/workflows/release.yml)
+when a version tag is pushed. The `v` prefix is stripped from the image tag.
+
+**Stable releases** (e.g. `v1.2.3`):
+
+| Tag | Description |
+| --- | --- |
+| `1.2.3` | Exact version — pinned, never changes |
+| `1.2` | Latest patch in the `1.2.x` line |
+| `1` | Latest minor + patch in the `1.x.x` line |
+| `latest` | Most recent stable release |
+
+**Prereleases** (e.g. `v1.3.0-rc1`):
+
+| Tag | Description |
+| --- | --- |
+| `1.3.0-rc1` | Exact prerelease — the only tag published |
+
+A prerelease never moves `latest`, `1.3` or `1`, so nothing following those
+tags is upgraded onto a release candidate.
+
+### Cutting a release
+
+```bash
+# Fedora / bash
+git tag -a v1.2.3 -m "v1.2.3" && git push origin v1.2.3
+```
+
+```fish
+# CachyOS / fish
+git tag -a v1.2.3 -m "v1.2.3"; and git push origin v1.2.3
+```
+
+Each image is pushed with a signed build provenance attestation:
+
+```bash
+gh attestation verify oci://ghcr.io/jakeward98/jward-helpdesk-api:1.2.3 \
+  --owner jakeward98
+```
+
+`workflow_dispatch` rebuilds an existing tag without moving it, for a run that
+failed partway through. The stack in `docker-compose.yml` builds from source
+rather than pulling these — swap a service's `build:` for the GHCR reference to
+deploy a pinned release instead.
+
 ## Configuration
 
 Everything comes from the environment; there is no config file to edit.
