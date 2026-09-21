@@ -17,4 +17,8 @@ ignore = ["S101", "B008"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put backend/ on sys.path so `pytest` finds the `app` package. Without this
+# only `python -m pytest` works, because that form adds the working directory
+# itself - and CI runs the bare command.
+pythonpath = ["."]
 filterwarnings = ["ignore::DeprecationWarning"]
