@@ -233,7 +233,7 @@ class TestTicketsApi:
         sign_in(client, "jane@example.org", USER_PASSWORD)
 
         template = next(
-            t for t in client.get("/api/templates").json() if t["slug"] == "it-support"
+            t for t in client.get("/api/templates").json() if t["slug"] == "device-problem"
         )
         response = client.post(
             "/api/tickets",
@@ -241,20 +241,20 @@ class TestTicketsApi:
                 "subject": "Laptop will not boot",
                 "body": "Blue screen on startup.",
                 "template_id": template["id"],
-                "field_values": {"device": "Laptop", "steps": "Pressed the power button"},
+                "field_values": {"device": "Laptop", "what_happened": "It beeps and stops"},
             },
         )
         assert response.status_code == 201, response.text
         body = response.json()
         assert body["key"].startswith("TKT-")
         assert body["field_values"]["device"] == "Laptop"
-        assert body["template_name"] == "IT support"
+        assert body["template_name"] == "Something is not working"
 
     def test_required_template_fields_are_enforced(self, client: TestClient, db: Session):
         make_user(db, "jane@example.org", "requester", USER_PASSWORD)
         sign_in(client, "jane@example.org", USER_PASSWORD)
         template = next(
-            t for t in client.get("/api/templates").json() if t["slug"] == "it-support"
+            t for t in client.get("/api/templates").json() if t["slug"] == "device-problem"
         )
 
         response = client.post(
@@ -391,19 +391,19 @@ class TestTicketsApi:
         client.headers["X-CSRF-Token"] = verified.json()["csrf_token"]
 
         template = next(
-            t for t in client.get("/api/templates").json() if t["slug"] == "it-support"
+            t for t in client.get("/api/templates").json() if t["slug"] == "device-problem"
         )
         response = client.patch(
             f"/api/tickets/{result.ticket_id}",
             json={
                 "template_id": template["id"],
-                "field_values": {"device": "Laptop", "steps": "Reported by email"},
+                "field_values": {"device": "Laptop", "what_happened": "Reported by email"},
                 "priority": "high",
             },
         )
         assert response.status_code == 200, response.text
         body = response.json()
-        assert body["template_name"] == "IT support"
+        assert body["template_name"] == "Something is not working"
         assert body["field_values"]["device"] == "Laptop"
         assert body["priority"] == "high"
 
@@ -556,14 +556,11 @@ class TestEmailRoundTrip:
 
         ticket = db.get(Ticket, created.ticket_id)
         db.refresh(ticket)
-        reply_address = mail_tokens.reply_address(
-            "helpdesk@test.invalid", ticket.number, ticket.reply_token
-        )
+        tag = mail_tokens.subject_tag(ticket.number, ticket.reply_token)
         answer = email_inbound.ingest(
             db,
             build_mail(
-                to=reply_address,
-                subject="Re: Laptop will not boot",
+                subject=f"Re: {tag} Laptop will not boot",
                 message_id="<customer-reply@example.org>",
                 body="Photo attached, it says INACCESSIBLE_BOOT_DEVICE.",
             ),

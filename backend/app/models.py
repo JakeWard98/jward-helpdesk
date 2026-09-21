@@ -161,8 +161,8 @@ class RateLimitBucket(Base):
 class Template(Base, TimestampMixin):
     """A ticket form. ``fields`` is a list of field definitions:
 
-        [{"key": "asset_tag", "label": "Asset tag", "type": "text",
-          "required": false, "options": [], "help": ""}]
+        [{"key": "device", "label": "What is it?", "type": "select",
+          "required": true, "options": ["Laptop", "Phone"], "help": ""}]
 
     Exactly one template carries ``is_fallback``; that is the one mail-in
     tickets get, and an agent can re-template them later in the GUI.
@@ -209,8 +209,8 @@ class Ticket(Base, TimestampMixin):
     # Answers to the template's custom fields, keyed by field key.
     field_values: Mapped[dict[str, Any]] = mapped_column(JSONType, nullable=False, default=dict)
 
-    # Random per-ticket salt mixed into the reply-address HMAC, so guessing one
-    # ticket's reply address tells you nothing about another's.
+    # Random per-ticket salt mixed into the reply-reference HMAC, so guessing
+    # one ticket's reference tells you nothing about another's.
     reply_token: Mapped[str] = mapped_column(String(32), nullable=False)
 
     first_response_at: Mapped[datetime | None] = mapped_column(

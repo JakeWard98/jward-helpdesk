@@ -16,8 +16,8 @@ Use `example.com` / `example.org` in anything committed.
 | API | Python 3.12, FastAPI, SQLAlchemy 2.0 (sync), Pydantic v2 |
 | Database | PostgreSQL 16 |
 | Frontend | React 18 + TypeScript + Vite, no UI framework, plain CSS |
-| Mail | `imapclient` in, `smtplib` out, both only in the worker container |
-| Deploy | Docker Compose, four services: `db`, `api`, `worker`, `web` |
+| Mail | `imapclient` in, `smtplib` out, both only in the worker container. Proton SMTP submission for sending; Proton Bridge for receiving |
+| Deploy | Docker Compose, four services: `db`, `api`, `worker`, `web`. Nginx Proxy Manager fronts it, Cloudflare tunnel fronts NPM |
 
 ## Ground rules
 
@@ -32,10 +32,16 @@ nice-to-have.
 - **Never** render email HTML that has not been through
   `services/sanitize.py`. `tickets.add_message` re-sanitises on purpose; it is
   the single choke point before the GUI.
-- **Never** trust a filename, a declared Content-Type, or a subject line.
-  Filenames go through `storage.safe_filename`, types through
-  `storage.sniff_content_type`, and a subject tag alone never grants access to
-  a ticket.
+- **Never** trust a filename, a declared Content-Type, or an *unsigned*
+  subject tag. Filenames go through `storage.safe_filename`, types through
+  `storage.sniff_content_type`, and a bare `[TKT-n]` only routes mail from
+  someone already on the ticket.
+- **Never** put the ticket reference in the email address. Providers mangle
+  plus-addressed local parts; the signed reference lives in the subject tag and
+  the body footer, and both are verified against the ticket's `reply_token`.
+- **Never** disable mail TLS verification for a non-local host.
+  `mail_tls.build_context` enforces that, and config validation catches it at
+  boot.
 - **Never** let the API container reach the network. Outbound mail is queued in
   `outbound_emails` and sent by the worker. Compose enforces this; keep it that
   way.
@@ -84,7 +90,8 @@ locally.
 | Inbound mail routing | `backend/app/services/email_inbound.py` |
 | Mail parsing (pure functions) | `backend/app/services/email_parse.py` |
 | Outbound queue and SMTP | `backend/app/services/email_outbound.py` |
-| Reply-address signing | `backend/app/security/mail_tokens.py` |
+| Subject / body reference signing | `backend/app/security/mail_tokens.py` |
+| Mail TLS, Proton Bridge certs | `backend/app/services/mail_tls.py` |
 | HTML sanitising | `backend/app/services/sanitize.py` |
 | Attachment storage | `backend/app/services/storage.py` |
 | Security headers, body limits | `backend/app/middleware.py` |

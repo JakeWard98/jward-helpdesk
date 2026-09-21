@@ -64,21 +64,34 @@ cookie is a second layer, not the only one.
 
 This is the most interesting attack surface, because anyone can send email.
 
-The **signed reply address** is the primary routing signal:
-`helpdesk+t.1042.<hmac>@example.com`, where the HMAC covers the ticket number
-and a random per-ticket token. Two properties matter: it cannot be forged
-without `APP_SECRET`, and seeing one ticket's address gives you nothing towards
-another's, because the per-ticket token is independent random data.
+The **signed reference** is the primary routing signal. It is an HMAC over the
+ticket number and a random per-ticket token, truncated to 12 hex characters,
+and it is carried twice: once in the subject tag `[TKT-1042-9f3c1ab27d0e]` and
+once in the body footer as `[ref:1042-9f3c1ab27d0e]`.
+
+Two copies because mail clients damage different things. A sender can rewrite a
+subject mid-thread; a sender almost never strips the quoted history, where the
+body reference sits. The body search deliberately runs against the *raw* text,
+before quoted history is trimmed for display.
+
+Deliberately **not** in the email address. Plus-addressing (`helpdesk+t.1042@…`)
+is the obvious place to put it and is what most ticketing systems do, but
+Proton and several other providers do not carry it reliably, and a forwarding
+rule rewrites the address long before it touches the subject or body.
+
+Both properties that matter still hold: the reference cannot be forged without
+`APP_SECRET`, and seeing one ticket's reference gives you nothing towards
+another's, because each ticket's token is independent random data.
 
 **Threading headers** are trusted as a secondary signal, because matching a
-`Message-ID` we generated ourselves is a reasonable proof of having received our
+`Message-ID` we generated ourselves is reasonable proof of having received our
 mail.
 
-**Subject tags** are the weak signal, and are treated as such: `[TKT-1042]` is
-accepted only from the requester, from staff, or from an address that has
-already written on that ticket. Without that check, anyone who could guess a
-ticket number could inject a message into somebody else's ticket — and ticket
-numbers are sequential, so guessing is trivial.
+**A bare subject tag** — `[TKT-1042]` with no signature — is the weak signal,
+and is treated as such: accepted only from the requester, from staff, or from
+an address that has already written on that ticket. Without that check, anyone
+who could guess a ticket number could inject a message into somebody else's
+ticket, and ticket numbers are sequential, so guessing is trivial.
 
 De-duplication is by `Message-ID`, recorded before the transaction commits. The
 worker only marks a message read (or moves it) *after* the transaction
@@ -122,6 +135,23 @@ Uploads are staged before a ticket exists, so an upload id could otherwise be a
 way to pull in someone else's file. Claiming an attachment requires it to be
 unclaimed *and* owned by the same uploader. Unclaimed uploads are swept after
 24 hours.
+
+## Mail transport
+
+Certificates are verified on both the SMTP and IMAP connections, and there is
+no global switch to turn that off — an unverified session to a mail server
+hands over the mailbox credentials to anything on the path.
+
+Proton Mail Bridge complicates this, because it presents a self-signed
+certificate. Two ways out, in order of preference:
+
+1. `IMAP_CA_CERT` / `SMTP_CA_CERT` point at the bridge's exported certificate.
+   Verification stays on, pinned to that certificate.
+2. `IMAP_TLS_INSECURE` / `SMTP_TLS_INSECURE` skip verification — but only for a
+   loopback address, a private address, or a bare container name. For anything
+   else `mail_tls.build_context` raises, and configuration validation catches
+   it at boot rather than at the first poll. The reasoning is narrow: on a
+   local docker network there is no meaningful path for someone to sit on.
 
 ## Network shape
 

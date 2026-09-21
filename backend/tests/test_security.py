@@ -107,22 +107,50 @@ class TestMailTokens:
         signature = mail_tokens.sign(1042, "token-abc")
         assert mail_tokens.verify(1042, "token-xyz", signature) is False
 
-    def test_reply_address_round_trips(self):
-        address = mail_tokens.reply_address("helpdesk@example.org", 77, "seed")
-        parsed = mail_tokens.parse_recipients([address])
+    def test_signed_subject_tag_round_trips(self):
+        tagged = mail_tokens.tag_subject("Printer broken", 77, "seed")
+        parsed = mail_tokens.parse_subject(f"Re: {tagged}")
+        assert parsed is not None
+        number, signature = parsed
+        assert number == 77
+        assert signature is not None
+        assert mail_tokens.verify(number, "seed", signature) is True
+
+    def test_subject_tag_is_not_duplicated_on_a_reply(self):
+        tagged = mail_tokens.tag_subject("Printer broken", 12, "seed")
+        assert mail_tokens.tag_subject(tagged, 12, "seed") == tagged
+        assert tagged.count("[TKT-") == 1
+
+    def test_subject_tag_replaces_a_stale_one(self):
+        # A bare tag someone typed by hand is upgraded to the signed form.
+        result = mail_tokens.tag_subject("Re: [TKT-12] Printer broken", 12, "seed")
+        assert result == f"Re: {mail_tokens.subject_tag(12, 'seed')} Printer broken"
+
+    def test_unsigned_subject_tag_parses_without_a_signature(self):
+        parsed = mail_tokens.parse_subject("Re: [TKT-12] Printer broken")
+        assert parsed == (12, None)
+
+    def test_no_tag_parses_to_none(self):
+        assert mail_tokens.parse_subject("no tag here") is None
+        assert mail_tokens.parse_subject("") is None
+
+    def test_body_reference_round_trips(self):
+        reference = mail_tokens.body_reference(77, "seed")
+        parsed = mail_tokens.parse_body(f"quoted stuff\n> {reference}\n")
         assert parsed is not None
         number, signature = parsed
         assert number == 77
         assert mail_tokens.verify(number, "seed", signature) is True
 
-    def test_subject_tag_is_added_once(self):
-        tagged = mail_tokens.tag_subject("Printer broken", 12)
-        assert tagged == "[TKT-12] Printer broken"
-        assert mail_tokens.tag_subject(tagged, 12) == tagged
+    def test_body_reference_is_found_in_the_html_body(self):
+        reference = mail_tokens.body_reference(5, "seed")
+        assert mail_tokens.parse_body(None, f"<p>hi</p><p>{reference}</p>") == (
+            5,
+            mail_tokens.sign(5, "seed"),
+        )
 
-    def test_subject_tag_is_parsed(self):
-        assert mail_tokens.parse_subject("Re: [TKT-12] Printer broken") == 12
-        assert mail_tokens.parse_subject("no tag here") is None
+    def test_body_without_a_reference_parses_to_none(self):
+        assert mail_tokens.parse_body("nothing here", None) is None
 
 
 class TestSanitiser:
@@ -221,3 +249,57 @@ class TestRateLimit:
         for _ in range(4):
             ratelimit.hit(db, "test:a", limit=3, window_seconds=60)
         assert ratelimit.hit(db, "test:b", limit=3, window_seconds=60).allowed is True
+
+
+class TestMailTls:
+    """Certificate handling for Proton Bridge and other local relays."""
+
+    def test_local_hosts_are_recognised(self):
+        from app.services import mail_tls
+
+        for host in (
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "192.168.1.50",
+            "10.0.0.8",
+            "protonmail-bridge",
+            "bridge.local",
+            "host.docker.internal",
+        ):
+            assert mail_tls.is_local_host(host) is True, host
+
+    def test_remote_hosts_are_not_local(self):
+        from app.services import mail_tls
+
+        for host in ("smtp.protonmail.ch", "imap.example.com", "1.1.1.1", ""):
+            assert mail_tls.is_local_host(host) is False, host
+
+    def test_verification_is_on_by_default(self):
+        import ssl
+
+        from app.services import mail_tls
+
+        context = mail_tls.build_context(host="smtp.protonmail.ch")
+        assert context.verify_mode == ssl.CERT_REQUIRED
+        assert context.check_hostname is True
+
+    def test_insecure_is_refused_for_a_remote_host(self):
+        from app.services import mail_tls
+
+        with pytest.raises(mail_tls.InsecureTlsRefused):
+            mail_tls.build_context(host="smtp.protonmail.ch", insecure=True)
+
+    def test_insecure_is_allowed_for_a_local_relay(self):
+        import ssl
+
+        from app.services import mail_tls
+
+        context = mail_tls.build_context(host="protonmail-bridge", insecure=True)
+        assert context.verify_mode == ssl.CERT_NONE
+
+    def test_missing_ca_certificate_is_reported(self):
+        from app.services import mail_tls
+
+        with pytest.raises(FileNotFoundError):
+            mail_tls.build_context(host="protonmail-bridge", ca_cert="/nope/missing.pem")

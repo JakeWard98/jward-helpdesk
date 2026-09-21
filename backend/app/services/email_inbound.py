@@ -2,15 +2,18 @@
 
 Routing precedence, strongest signal first:
 
-  1. **Signed reply address** - ``helpdesk+t.1042.<hmac>@domain``. The HMAC is
-     verified against the ticket's stored ``reply_token``, so this cannot be
-     forged.
-  2. **Threading headers** - ``In-Reply-To`` / ``References`` matched against
+  1. **Signed subject tag** - ``[TKT-1042-9f3c1ab27d0e]``. The HMAC is verified
+     against the ticket's stored ``reply_token``, so it cannot be forged.
+  2. **Signed body reference** - ``[ref:1042-9f3c1ab27d0e]`` anywhere in the
+     raw body, including the quoted history. Catches replies where the sender
+     rewrote the subject.
+  3. **Threading headers** - ``In-Reply-To`` / ``References`` matched against
      Message-IDs we previously sent or ingested.
-  3. **Subject tag** - ``[TKT-1042]``, accepted *only* when the sender already
-     has a place on that ticket. A subject line is trivially copied, so on its
-     own it must never grant access to somebody else's ticket.
-  4. Otherwise a new ticket, on the fallback template.
+  4. **Unsigned subject tag** - a bare ``[TKT-1042]``, accepted *only* when the
+     sender already has a place on that ticket. A subject line is trivially
+     copied, so on its own it must never grant access to somebody else's
+     ticket.
+  5. Otherwise a new ticket, on the fallback template.
 
 Every message is recorded in ``processed_inbound_emails`` by Message-ID, so
 re-reading a mailbox can never duplicate a ticket.
@@ -57,19 +60,32 @@ def _already_processed(db: Session, message_id: str) -> ProcessedInboundEmail | 
     return db.get(ProcessedInboundEmail, message_id)
 
 
-def _find_by_reply_address(db: Session, parsed: ParsedEmail) -> Ticket | None:
-    hit = mail_tokens.parse_recipients(parsed.all_recipients)
-    if not hit:
-        return None
-    number, signature = hit
+def _verified(db: Session, number: int, signature: str, source: str) -> Ticket | None:
+    """Load a ticket only if the supplied signature matches it."""
     ticket = db.query(Ticket).filter(Ticket.number == number).one_or_none()
     if ticket is None:
-        log.warning("reply address referenced unknown ticket %s", number)
+        log.warning("%s referenced unknown ticket %s", source, number)
         return None
     if not mail_tokens.verify(number, ticket.reply_token, signature):
-        log.warning("reply address for ticket %s failed signature check", number)
+        log.warning("%s for ticket %s failed the signature check", source, number)
         return None
     return ticket
+
+
+def _find_by_signed_subject(db: Session, parsed: ParsedEmail) -> Ticket | None:
+    hit = mail_tokens.parse_subject(parsed.subject)
+    if not hit or hit[1] is None:
+        return None
+    return _verified(db, hit[0], hit[1], "subject tag")
+
+
+def _find_by_signed_body(db: Session, parsed: ParsedEmail) -> Ticket | None:
+    # Search the raw bodies, not the quote-stripped text: the reference is
+    # usually sitting in exactly the quoted history that gets trimmed.
+    hit = mail_tokens.parse_body(parsed.text_body, parsed.html_body)
+    if not hit:
+        return None
+    return _verified(db, hit[0], hit[1], "body reference")
 
 
 def _find_by_threading(db: Session, parsed: ParsedEmail) -> Ticket | None:
@@ -109,10 +125,17 @@ def _sender_belongs_to_ticket(db: Session, ticket: Ticket, sender_email: str) ->
     return existing is not None
 
 
-def _find_by_subject(db: Session, parsed: ParsedEmail) -> Ticket | None:
-    number = mail_tokens.parse_subject(parsed.subject)
-    if number is None:
-        return None
+def _find_by_unsigned_subject(db: Session, parsed: ParsedEmail) -> Ticket | None:
+    """Last resort: a bare ``[TKT-1042]`` with no signature.
+
+    Only honoured for someone already on the ticket. Ticket numbers are
+    sequential, so without that check anyone could guess one and post into a
+    stranger's ticket.
+    """
+    hit = mail_tokens.parse_subject(parsed.subject)
+    if not hit or hit[1] is not None:
+        return None  # signed tags were already handled, and failed
+    number = hit[0]
     ticket = db.query(Ticket).filter(Ticket.number == number).one_or_none()
     if ticket is None:
         return None
@@ -128,15 +151,15 @@ def _find_by_subject(db: Session, parsed: ParsedEmail) -> Ticket | None:
 
 def find_ticket(db: Session, parsed: ParsedEmail) -> tuple[Ticket | None, str]:
     """Locate the ticket this mail belongs to, with the reason it matched."""
-    ticket = _find_by_reply_address(db, parsed)
-    if ticket:
-        return ticket, "reply-address"
-    ticket = _find_by_threading(db, parsed)
-    if ticket:
-        return ticket, "threading-headers"
-    ticket = _find_by_subject(db, parsed)
-    if ticket:
-        return ticket, "subject-tag"
+    for finder, reason in (
+        (_find_by_signed_subject, "signed-subject"),
+        (_find_by_signed_body, "signed-body-ref"),
+        (_find_by_threading, "threading-headers"),
+        (_find_by_unsigned_subject, "unsigned-subject"),
+    ):
+        ticket = finder(db, parsed)
+        if ticket:
+            return ticket, reason
     return None, "none"
 
 

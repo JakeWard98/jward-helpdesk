@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_security: Literal["starttls", "ssl", "none"] = "starttls"
+    # Path to a PEM certificate to trust, for a local relay such as Proton
+    # Mail Bridge. Verification stays on, against this certificate.
+    smtp_ca_cert: str = ""
+    # Skips verification altogether. Only honoured for a local host - see
+    # services/mail_tls.py.
+    smtp_tls_insecure: bool = False
     smtp_from_name: str = "Helpdesk"
     smtp_from_email: str = ""
     smtp_reply_to_email: str = ""
@@ -62,7 +68,11 @@ class Settings(BaseSettings):
     imap_port: int = 993
     imap_username: str = ""
     imap_password: str = ""
-    imap_use_ssl: bool = True
+    # ssl = implicit TLS (port 993), starttls = upgrade after connecting
+    # (Proton Mail Bridge uses this on 1143), none = plaintext, local only.
+    imap_security: Literal["ssl", "starttls", "none"] = "ssl"
+    imap_ca_cert: str = ""
+    imap_tls_insecure: bool = False
     imap_folder: str = "INBOX"
     imap_processed_folder: str = ""
     imap_poll_seconds: int = 60
@@ -130,6 +140,23 @@ class Settings(BaseSettings):
             problems.append("BOOTSTRAP_ADMIN_PASSWORD still contains a placeholder value")
         if self.inbound_email_enabled and not self.imap_host:
             problems.append("INBOUND_EMAIL_ENABLED is true but IMAP_HOST is empty")
+
+        # Catch an unverified connection to a remote mail server at boot
+        # rather than at the first poll.
+        from app.services.mail_tls import is_local_host
+
+        if self.smtp_tls_insecure and not is_local_host(self.smtp_host):
+            problems.append(
+                f"SMTP_TLS_INSECURE is set but SMTP_HOST ({self.smtp_host}) is not local"
+            )
+        if self.imap_tls_insecure and not is_local_host(self.imap_host):
+            problems.append(
+                f"IMAP_TLS_INSECURE is set but IMAP_HOST ({self.imap_host}) is not local"
+            )
+        if self.imap_security == "none" and not is_local_host(self.imap_host):
+            problems.append(
+                f"IMAP_SECURITY=none is only allowed for a local host, not {self.imap_host}"
+            )
 
         if problems:
             raise ValueError(

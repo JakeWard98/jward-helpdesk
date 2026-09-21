@@ -23,10 +23,12 @@ minutes. `worker` reuses the API image with a different command.
 | `api` | FastAPI, serves `/api` | `internal` (no egress — by design) |
 | `worker` | IMAP poller + SMTP sender + housekeeping | `internal`, `egress` |
 | `web` | nginx: SPA + reverse proxy to `api` | `internal`, `edge` |
-| `cloudflared` | optional, `--profile tunnel` | `edge`, `egress` |
 
-`internal` and `edge` are both `internal: true`, so only `worker` and
-`cloudflared` can reach the outside world. Nothing binds a host port.
+`internal` is `internal: true`, so the only container with a route to the
+internet is `worker`, which needs one to reach your mail provider. `edge` is
+your existing Nginx Proxy Manager network, joined rather than created — set
+`PROXY_NETWORK` to its real name. Nothing binds a host port; see
+[reverse-proxy.md](reverse-proxy.md).
 
 ## First boot
 
@@ -138,4 +140,6 @@ then redeploy with the bootstrap variables set. This is deliberately manual.
 | Sign-in page loads, API calls fail | `web` cannot reach `api`; check both are on `internal` |
 | "Too many attempts" during testing | The rate limiter is doing its job; wait out `LOGIN_LOCKOUT_SECONDS` or clear `rate_limit_buckets` |
 | Emails queue but never send | `docker logs helpdesk-worker`; check `worker` is on the `egress` network |
+| Stack will not deploy, "network not found" | `PROXY_NETWORK` does not match a real network — check `docker network ls` |
+| Proton Bridge certificate errors | Expected, it is self-signed. Set `IMAP_CA_CERT`, or `IMAP_TLS_INSECURE=true` for a bridge on the local network |
 | Replies create new tickets | [docs/email.md](email.md#replies-create-new-tickets) |

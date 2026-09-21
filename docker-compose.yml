@@ -6,9 +6,10 @@
 # Variables are referenced explicitly below (rather than via env_file) so a
 # Portainer git-backed stack works without a .env file on disk.
 #
-# Nothing is published to the host. cloudflared joins the "edge" network and
-# reaches the web container by service name, so the helpdesk is never exposed
-# on a LAN port. See docs/cloudflare-tunnel.md.
+# Nothing is published to the host. The web container joins your existing
+# Nginx Proxy Manager network (PROXY_NETWORK) so NPM can reach it by service
+# name at http://helpdesk-web:8080, and the Cloudflare tunnel sits in front of
+# NPM. See docs/reverse-proxy.md.
 # =============================================================================
 
 x-logging: &default-logging
@@ -45,6 +46,8 @@ x-app-env: &app-env
   SMTP_USERNAME: ${SMTP_USERNAME:-}
   SMTP_PASSWORD: ${SMTP_PASSWORD:-}
   SMTP_SECURITY: ${SMTP_SECURITY:-starttls}
+  SMTP_CA_CERT: ${SMTP_CA_CERT:-}
+  SMTP_TLS_INSECURE: ${SMTP_TLS_INSECURE:-false}
   SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Helpdesk}
   SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
   SMTP_REPLY_TO_EMAIL: ${SMTP_REPLY_TO_EMAIL:-}
@@ -53,7 +56,9 @@ x-app-env: &app-env
   IMAP_PORT: ${IMAP_PORT:-993}
   IMAP_USERNAME: ${IMAP_USERNAME:-}
   IMAP_PASSWORD: ${IMAP_PASSWORD:-}
-  IMAP_USE_SSL: ${IMAP_USE_SSL:-true}
+  IMAP_SECURITY: ${IMAP_SECURITY:-ssl}
+  IMAP_CA_CERT: ${IMAP_CA_CERT:-}
+  IMAP_TLS_INSECURE: ${IMAP_TLS_INSECURE:-false}
   IMAP_FOLDER: ${IMAP_FOLDER:-INBOX}
   IMAP_PROCESSED_FOLDER: ${IMAP_PROCESSED_FOLDER:-}
   IMAP_POLL_SECONDS: ${IMAP_POLL_SECONDS:-60}
@@ -141,13 +146,14 @@ services:
         condition: service_healthy
 
   # Serves the built SPA and reverse-proxies /api to the api container.
+  # Reached by Nginx Proxy Manager over the shared "edge" network as
+  # http://helpdesk-web:8080 - no host port, no LAN exposure.
   web:
     <<: *hardened
     build:
       context: ./frontend
     image: jward-helpdesk-web:latest
     container_name: helpdesk-web
-    # Both attached networks are internal, so the SPA host has no egress either.
     networks:
       - internal
       - edge
@@ -159,22 +165,6 @@ services:
       timeout: 5s
       retries: 3
 
-  # Optional: run the tunnel inside this stack.
-  #   docker compose --profile tunnel up -d
-  # Already have a cloudflared container? Leave this disabled, attach yours to
-  # the "edge" network, and point the public hostname at http://helpdesk-web:8080
-  cloudflared:
-    <<: *hardened
-    image: cloudflare/cloudflared:latest
-    container_name: helpdesk-tunnel
-    profiles: ["tunnel"]
-    command: ["tunnel", "--no-autoupdate", "run", "--token", "${CLOUDFLARE_TUNNEL_TOKEN:-}"]
-    networks:
-      - edge
-      - egress
-    depends_on:
-      - web
-
 volumes:
   db-data:
   attachments:
@@ -183,8 +173,17 @@ networks:
   # Database + application traffic. internal:true means no route off the host.
   internal:
     internal: true
-  # Tunnel <-> web only.
+
+  # Your existing Nginx Proxy Manager network, joined rather than created.
+  # Find its name with `docker network ls` - for a stack called "npm" it is
+  # usually npm_default. Set PROXY_NETWORK if yours differs.
+  #
+  # Not using NPM? Delete the two lines below, drop "external: true", and
+  # publish a port on the web service instead:  ports: ["127.0.0.1:8088:8080"]
   edge:
-    internal: true
-  # The one network with outbound access, shared by the worker and the tunnel.
+    external: true
+    name: ${PROXY_NETWORK:-npm_default}
+
+  # The one network with outbound access. Only the worker needs it, to reach
+  # your mail provider.
   egress:

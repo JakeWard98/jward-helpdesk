@@ -32,7 +32,8 @@ anyone can send it email.
 | Brute force | Per-IP and per-account fixed-window limits shared across workers, account lockout, identical error message and timing for unknown and wrong-password accounts |
 | CSRF | Synchroniser token held in the session row, echoed in `X-CSRF-Token`, required on every state-changing request |
 | Authorisation | Role checks in dependencies; requesters are scoped to their own tickets and never see internal notes; "not yours" returns 404, not 403 |
-| Email injection | Reply addresses signed with HMAC over ticket number and a per-ticket token; subject tags accepted only from existing participants; `Message-ID` deduplication; auto-reply loop detection |
+| Email injection | Ticket references signed with an HMAC over the ticket number and a per-ticket token, carried in both the subject tag and the body footer; an *unsigned* subject tag is accepted only from existing participants; `Message-ID` deduplication; auto-reply loop detection |
+| Mail transport | Certificates verified by default; verification can only be skipped for a loopback, private or container-name host, and the app refuses to start otherwise |
 | Mail HTML | Sanitised with nh3 (script, style, event handlers, frames and forms removed), remote images stripped, `cid:` images rewritten to same-origin URLs |
 | Uploads | Generated storage paths, flattened filenames, magic-byte content sniffing, size caps, everything served `nosniff` and `Content-Disposition: attachment` unless it is a verified image |
 | Transport | HSTS, strict CSP, `frame-ancestors 'none'`, `no-referrer`, no API response cached |
@@ -43,7 +44,8 @@ anyone can send it email.
 
 Worth being honest about:
 
-- **A compromised Cloudflare tunnel or account.** The tunnel is the perimeter.
+- **A compromised Cloudflare tunnel, Nginx Proxy Manager, or Cloudflare
+  account.** Those are the perimeter.
 - **A malicious admin.** Admins can reset MFA and passwords for other accounts.
   That is the intended recovery path; it is logged, not prevented.
 - **Mail spoofing upstream.** Anything the mailbox accepts, the helpdesk
@@ -60,9 +62,13 @@ If you run this:
 - Generate `APP_SECRET` and the database password yourself, 32 random bytes each.
 - Clear `BOOTSTRAP_ADMIN_PASSWORD` from the stack environment after first login.
 - Leave `REQUIRE_MFA_FOR_AGENTS=true`.
-- Only set `TRUST_CLOUDFLARE_HEADERS=true` when the tunnel is genuinely the
-  only route to the container. Otherwise the header is attacker-controlled and
-  the rate limiter can be bypassed.
+- Only set `TRUST_CLOUDFLARE_HEADERS=true` when every route to the helpdesk
+  passes through the tunnel. If your reverse proxy also serves the same host to
+  the LAN, the header is attacker-controlled and the rate limiter can be
+  bypassed — see docs/reverse-proxy.md.
+- Prefer `IMAP_CA_CERT` over `IMAP_TLS_INSECURE` for Proton Bridge. The
+  insecure flag is only accepted for a local host, but a pinned certificate is
+  strictly better.
 - Consider putting Cloudflare Access in front of the whole thing, so
   unauthenticated traffic never reaches the app at all.
 - Keep backups of the `db-data` and `attachments` volumes, and test restoring

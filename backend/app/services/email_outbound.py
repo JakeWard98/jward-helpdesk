@@ -25,6 +25,7 @@ from app.models import Attachment, OutboundEmail, Ticket, TicketMessage
 from app.security import mail_tokens
 from app.services import storage
 from app.services.email_parse import REPLY_DELIMITER
+from app.services.mail_tls import build_context
 
 log = logging.getLogger(__name__)
 
@@ -89,17 +90,17 @@ def queue_message(
     rfc822_id = new_message_id()
     in_reply_to, references = _thread_headers(db, ticket)
 
-    reply_to = mail_tokens.reply_address(
-        settings.smtp_reply_to_email or settings.smtp_from_email,
-        ticket.number,
-        ticket.reply_token,
-    )
+    # A plain address: the ticket reference travels in the subject and the
+    # body, never in the local part.
+    reply_to = settings.smtp_reply_to_email or settings.smtp_from_email
 
     outbound = OutboundEmail(
         ticket_id=ticket.id,
         message_id=message.id,
         to_email=to_email,
-        subject=mail_tokens.tag_subject(subject or ticket.subject, ticket.number),
+        subject=mail_tokens.tag_subject(
+            subject or ticket.subject, ticket.number, ticket.reply_token
+        ),
         body_text=body_text if body_text is not None else message.body_text,
         body_html=body_html if body_html is not None else message.body_html,
         rfc822_message_id=rfc822_id,
@@ -119,7 +120,12 @@ def queue_message(
 
 
 def compose_body(ticket: Ticket, body_text: str, *, signature: str = "") -> str:
-    """Wrap an agent reply with the reply delimiter and a ticket footer."""
+    """Wrap an agent reply with the reply delimiter and a ticket footer.
+
+    The footer carries the signed body reference. It looks like noise, but it
+    is what lets a reply be matched when the sender has rewritten the subject,
+    and it survives in the quoted history of essentially every mail client.
+    """
     parts = [REPLY_DELIMITER, "", body_text.strip()]
     if signature:
         parts += ["", signature.strip()]
@@ -128,6 +134,7 @@ def compose_body(ticket: Ticket, body_text: str, *, signature: str = "") -> str:
         "--",
         f"{settings.smtp_from_name} - ticket {ticket.key}",
         "Reply to this email and your message will be added to the ticket.",
+        mail_tokens.body_reference(ticket.number, ticket.reply_token),
     ]
     return "\n".join(parts)
 
@@ -181,9 +188,11 @@ def _build_mime(db: Session, row: OutboundEmail) -> EmailMessage:
 
 
 def _connect() -> smtplib.SMTP:
-    context = ssl.create_default_context()
-    # Certificate verification stays on: an unverified TLS session would let
-    # anything on the path read the mailbox credentials.
+    context = build_context(
+        host=settings.smtp_host,
+        ca_cert=settings.smtp_ca_cert,
+        insecure=settings.smtp_tls_insecure,
+    )
     if settings.smtp_security == "ssl":
         client: smtplib.SMTP = smtplib.SMTP_SSL(
             settings.smtp_host, settings.smtp_port, timeout=30, context=context

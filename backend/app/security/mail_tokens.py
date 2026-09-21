@@ -1,17 +1,24 @@
-"""Signed reply addresses and subject tags.
+"""Signed ticket references carried in the subject line and the message body.
 
-Every outbound mail carries a ``Reply-To`` of the form::
+Nothing is encoded into the email *address* - plenty of providers (Proton
+among them) will not carry a plus-addressed local part reliably, and the
+address is the one part of an email a forwarding rule is most likely to
+rewrite. Instead every outbound message carries the same signed reference
+twice:
 
-    helpdesk+t.1042.9f3c1ab27d0e4a56@example.com
-             ^^ ^^^^ ^^^^^^^^^^^^^^^^
-             |  |    HMAC(app secret, "1042:<ticket.reply_token>")
-             |  ticket number
-             tag marker
+    Subject: [TKT-1042-9f3c1ab27d0e] Laptop will not boot
+    ...
+    [ref:1042-9f3c1ab27d0e]
 
-so a reply can be routed to the right ticket without trusting the sender, and
-without letting anyone forge a reply address for a ticket they cannot see.
-Threading headers are still used as a fallback; this is just the strongest
-signal available.
+where the signature is ``HMAC(app secret, "<number>:<ticket.reply_token>")``.
+``reply_token`` is 16 random bytes stored on the ticket, so one ticket's
+reference tells you nothing about another's, and neither can be forged
+without ``APP_SECRET``.
+
+Two copies because mail clients damage different things: a subject can be
+rewritten by the sender ("changing the subject" mid-thread), while the body
+reference survives in the quoted history of almost any reply. If both are
+gone, threading headers are still tried - see ``services/email_inbound``.
 """
 
 from __future__ import annotations
@@ -22,9 +29,16 @@ from hashlib import sha256
 
 from app.security.crypto import constant_time_equals, mail_token_key
 
-SIGNATURE_LENGTH = 16
-_PLUS_RE = re.compile(rf"\+t\.(\d+)\.([0-9a-f]{{{SIGNATURE_LENGTH}}})", re.IGNORECASE)
-_SUBJECT_RE = re.compile(r"\[TKT-(\d+)\]", re.IGNORECASE)
+# 48 bits. Short enough to live in a subject line without being an eyesore,
+# far beyond guessing at the rate a mailbox can be fed.
+SIGNATURE_LENGTH = 12
+
+_SUBJECT_RE = re.compile(
+    rf"\[TKT-(\d+)(?:-([0-9a-f]{{{SIGNATURE_LENGTH}}}))?\]", re.IGNORECASE
+)
+_BODY_RE = re.compile(
+    rf"\[ref:(\d+)-([0-9a-f]{{{SIGNATURE_LENGTH}}})\]", re.IGNORECASE
+)
 
 
 def sign(ticket_number: int, reply_token: str) -> str:
@@ -38,36 +52,55 @@ def verify(ticket_number: int, reply_token: str, signature: str) -> bool:
     return constant_time_equals(sign(ticket_number, reply_token), (signature or "").lower())
 
 
-def reply_address(base_address: str, ticket_number: int, reply_token: str) -> str:
-    """Build the plus-addressed Reply-To for a ticket.
+# ---------------------------------------------------------------------------
+# subject line
+# ---------------------------------------------------------------------------
+def subject_tag(ticket_number: int, reply_token: str) -> str:
+    return f"[TKT-{ticket_number}-{sign(ticket_number, reply_token)}]"
 
-    Falls back to the bare address when the mailbox has no local part to
-    extend (which only happens on a misconfiguration).
+
+def tag_subject(subject: str, ticket_number: int, reply_token: str) -> str:
+    """Ensure the subject carries exactly one signed ticket tag.
+
+    An existing tag is replaced rather than appended to, so a reply whose
+    subject already carries the tag does not accumulate copies.
     """
-    if "@" not in base_address:
-        return base_address
-    local, domain = base_address.rsplit("@", 1)
-    return f"{local}+t.{ticket_number}.{sign(ticket_number, reply_token)}@{domain}"
+    subject = (subject or "").strip()
+    tag = subject_tag(ticket_number, reply_token)
+    if _SUBJECT_RE.search(subject):
+        return _SUBJECT_RE.sub(tag, subject, count=1)
+    return f"{tag} {subject}".strip()
 
 
-def parse_recipients(addresses: list[str]) -> tuple[int, str] | None:
-    """Find ``(ticket_number, signature)`` in any To/Cc/Delivered-To address."""
-    for address in addresses:
-        match = _PLUS_RE.search(address or "")
+def parse_subject(subject: str) -> tuple[int, str | None] | None:
+    """Find a ticket tag in a subject line.
+
+    Returns ``(ticket_number, signature_or_None)``. An unsigned tag is still
+    reported, because it is a useful hint - but the caller must treat it as
+    unverified and fall back to checking the sender.
+    """
+    match = _SUBJECT_RE.search(subject or "")
+    if not match:
+        return None
+    signature = match.group(2)
+    return int(match.group(1)), signature.lower() if signature else None
+
+
+# ---------------------------------------------------------------------------
+# message body
+# ---------------------------------------------------------------------------
+def body_reference(ticket_number: int, reply_token: str) -> str:
+    return f"[ref:{ticket_number}-{sign(ticket_number, reply_token)}]"
+
+
+def parse_body(*bodies: str | None) -> tuple[int, str] | None:
+    """Find a signed reference anywhere in the given bodies.
+
+    The *raw* body is searched, before quoted history is trimmed, because the
+    reference usually survives precisely in that quoted history.
+    """
+    for body in bodies:
+        match = _BODY_RE.search(body or "")
         if match:
             return int(match.group(1)), match.group(2).lower()
     return None
-
-
-def parse_subject(subject: str) -> int | None:
-    """Find a ``[TKT-123]`` tag in a subject line."""
-    match = _SUBJECT_RE.search(subject or "")
-    return int(match.group(1)) if match else None
-
-
-def tag_subject(subject: str, ticket_number: int) -> str:
-    """Ensure the subject carries exactly one ticket tag."""
-    tag = f"[TKT-{ticket_number}]"
-    if _SUBJECT_RE.search(subject or ""):
-        return subject
-    return f"{tag} {subject}".strip()

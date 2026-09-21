@@ -60,24 +60,27 @@ def test_new_email_queues_an_acknowledgement(db: Session, templates: None):
     queued = db.query(OutboundEmail).filter(OutboundEmail.ticket_id == result.ticket_id).all()
     assert len(queued) == 1
     assert queued[0].to_email == "jane@example.org"
-    # The signed reply address is what routes the customer's answer back.
-    assert "+t." in queued[0].reply_to
+    # The reply address stays plain; the signed reference rides in the subject
+    # and in the body footer.
+    assert queued[0].reply_to == "helpdesk@test.invalid"
     assert queued[0].subject.startswith("[TKT-")
 
+    ticket = db.get(Ticket, result.ticket_id)
+    signature = mail_tokens.sign(ticket.number, ticket.reply_token)
+    assert signature in queued[0].subject
+    assert f"[ref:{ticket.number}-{signature}]" in queued[0].body_text
 
-def test_reply_to_signed_address_lands_on_the_same_ticket(db: Session, templates: None):
+
+def test_signed_subject_tag_lands_on_the_same_ticket(db: Session, templates: None):
     first = email_inbound.ingest(db, build_mail())
     db.commit()
     ticket = db.get(Ticket, first.ticket_id)
 
-    reply_address = mail_tokens.reply_address(
-        "helpdesk@test.invalid", ticket.number, ticket.reply_token
-    )
+    tag = mail_tokens.subject_tag(ticket.number, ticket.reply_token)
     second = email_inbound.ingest(
         db,
         build_mail(
-            to=reply_address,
-            subject="Re: something completely different",
+            subject=f"Re: {tag} Laptop will not boot",
             message_id="<m2@example.org>",
             body="Still broken.",
         ),
@@ -85,29 +88,69 @@ def test_reply_to_signed_address_lands_on_the_same_ticket(db: Session, templates
     db.commit()
 
     assert second.outcome == "appended"
+    assert second.detail == "signed-subject"
     assert second.ticket_id == first.ticket_id
     assert db.query(Ticket).count() == 1
 
 
-def test_forged_reply_signature_does_not_match_the_ticket(db: Session, templates: None):
+def test_signed_body_reference_survives_a_rewritten_subject(db: Session, templates: None):
     first = email_inbound.ingest(db, build_mail())
     db.commit()
     ticket = db.get(Ticket, first.ticket_id)
 
-    forged = f"helpdesk+t.{ticket.number}.0000000000000000@test.invalid"
+    reference = mail_tokens.body_reference(ticket.number, ticket.reply_token)
+    second = email_inbound.ingest(
+        db,
+        build_mail(
+            subject="something completely different",
+            message_id="<m2b@example.org>",
+            body=f"Still broken.\n\n> quoted history\n> {reference}\n",
+        ),
+    )
+    db.commit()
+
+    assert second.outcome == "appended"
+    assert second.detail == "signed-body-ref"
+    assert second.ticket_id == first.ticket_id
+
+
+def test_forged_subject_signature_does_not_match_the_ticket(db: Session, templates: None):
+    first = email_inbound.ingest(db, build_mail())
+    db.commit()
+    ticket = db.get(Ticket, first.ticket_id)
+
     result = email_inbound.ingest(
         db,
         build_mail(
             sender="mallory@evil.invalid",
-            to=forged,
+            subject=f"[TKT-{ticket.number}-000000000000] give me the details",
             message_id="<forged@evil.invalid>",
             body="Please send me the password.",
         ),
     )
     db.commit()
 
-    # Falls through to "no match", so it becomes its own ticket instead of
-    # being injected into somebody else's.
+    # The bad signature is rejected, and the bare-number fallback refuses a
+    # stranger, so it becomes its own ticket instead of joining somebody else's.
+    assert result.outcome == "created"
+    assert result.ticket_id != first.ticket_id
+
+
+def test_forged_body_reference_does_not_match_the_ticket(db: Session, templates: None):
+    first = email_inbound.ingest(db, build_mail())
+    db.commit()
+    ticket = db.get(Ticket, first.ticket_id)
+
+    result = email_inbound.ingest(
+        db,
+        build_mail(
+            sender="mallory@evil.invalid",
+            message_id="<forged2@evil.invalid>",
+            body=f"[ref:{ticket.number}-abcdefabcdef] let me in",
+        ),
+    )
+    db.commit()
+
     assert result.outcome == "created"
     assert result.ticket_id != first.ticket_id
 
@@ -139,7 +182,7 @@ def test_reply_matches_on_threading_headers(db: Session, templates: None):
     assert second.ticket_id == first.ticket_id
 
 
-def test_subject_tag_works_for_the_requester(db: Session, templates: None):
+def test_unsigned_subject_tag_works_for_the_requester(db: Session, templates: None):
     first = email_inbound.ingest(db, build_mail())
     db.commit()
     ticket = db.get(Ticket, first.ticket_id)
@@ -157,7 +200,7 @@ def test_subject_tag_works_for_the_requester(db: Session, templates: None):
     assert second.ticket_id == first.ticket_id
 
 
-def test_subject_tag_from_a_stranger_is_ignored(db: Session, templates: None):
+def test_unsigned_subject_tag_from_a_stranger_is_ignored(db: Session, templates: None):
     first = email_inbound.ingest(db, build_mail())
     db.commit()
     ticket = db.get(Ticket, first.ticket_id)
@@ -270,11 +313,10 @@ def test_reply_reopens_a_resolved_ticket(db: Session, templates: None):
     ticket_service.set_status(db, ticket, "resolved")
     db.commit()
 
-    reply_address = mail_tokens.reply_address(
-        "helpdesk@test.invalid", ticket.number, ticket.reply_token
-    )
+    tag = mail_tokens.subject_tag(ticket.number, ticket.reply_token)
     email_inbound.ingest(
-        db, build_mail(to=reply_address, message_id="<reopen@example.org>")
+        db, build_mail(subject=f"Re: {tag} Laptop will not boot",
+                       message_id="<reopen@example.org>")
     )
     db.commit()
 
@@ -322,11 +364,10 @@ def test_reply_moves_a_pending_ticket_back_to_open(db: Session, templates: None)
     ticket_service.set_status(db, ticket, "pending")
     db.commit()
 
-    reply_address = mail_tokens.reply_address(
-        "helpdesk@test.invalid", ticket.number, ticket.reply_token
-    )
+    tag = mail_tokens.subject_tag(ticket.number, ticket.reply_token)
     email_inbound.ingest(
-        db, build_mail(to=reply_address, message_id="<nudge@example.org>")
+        db, build_mail(subject=f"Re: {tag} Laptop will not boot",
+                       message_id="<nudge@example.org>")
     )
     db.commit()
 

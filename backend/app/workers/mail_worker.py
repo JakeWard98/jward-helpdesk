@@ -23,6 +23,7 @@ from app.database import session_scope
 from app.security import ratelimit, sessions
 from app.services import email_inbound, email_outbound
 from app.services import tickets as ticket_service
+from app.services.mail_tls import build_context
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level, logging.INFO),
@@ -53,15 +54,28 @@ def fetch_inbound() -> int:
     from imapclient.exceptions import IMAPClientError
 
     processed = 0
-    context = ssl.create_default_context() if settings.imap_use_ssl else None
+    use_implicit_tls = settings.imap_security == "ssl"
+    context = (
+        build_context(
+            host=settings.imap_host,
+            ca_cert=settings.imap_ca_cert,
+            insecure=settings.imap_tls_insecure,
+        )
+        if settings.imap_security != "none"
+        else None
+    )
     try:
         with IMAPClient(
             host=settings.imap_host,
             port=settings.imap_port,
-            ssl=settings.imap_use_ssl,
-            ssl_context=context,
+            ssl=use_implicit_tls,
+            ssl_context=context if use_implicit_tls else None,
             timeout=60,
         ) as client:
+            # Proton Mail Bridge and most local relays listen in the clear and
+            # upgrade, rather than wrapping the socket from the start.
+            if settings.imap_security == "starttls":
+                client.starttls(ssl_context=context)
             client.login(settings.imap_username, settings.imap_password)
             client.select_folder(settings.imap_folder)
 
