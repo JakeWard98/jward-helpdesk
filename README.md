@@ -70,18 +70,16 @@ flowchart TB
 2. Fill the **Environment variables** pane from [`.env.example`](.env.example).
    Generate every secret yourself:
 
-   ```fish
-   # CachyOS / fish
-   for name in APP_SECRET POSTGRES_PASSWORD
-       echo "$name="(openssl rand -hex 32)
-   end
+   ```bash
+   # run once per secret
+   openssl rand -hex 32
    ```
 
-   ```bash
-   # Fedora / bash
-   for name in APP_SECRET POSTGRES_PASSWORD; do
-     echo "$name=$(openssl rand -hex 32)"
-   done
+   ```powershell
+   # PowerShell 7 - run once per secret
+   # 32 cryptographically random bytes as 64 hex chars, same as `openssl rand -hex 32`.
+   # Get-Random is not a CSPRNG, so do not substitute it here.
+   [Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLower()
    ```
 
 3. Deploy. On first boot the API creates the schema, seeds the default
@@ -98,7 +96,7 @@ flowchart TB
 ### Local development
 
 ```bash
-# Fedora / bash - backend
+# bash - backend
 cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
@@ -110,7 +108,7 @@ cd frontend && npm install && npm run dev   # http://localhost:5173
 ```
 
 ```fish
-# CachyOS / fish - backend
+# fish - backend
 cd backend
 python3 -m venv .venv; and source .venv/bin/activate.fish
 pip install -r requirements-dev.txt
