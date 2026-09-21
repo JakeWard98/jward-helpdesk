@@ -1,0 +1,190 @@
+# =============================================================================
+# jward-helpdesk - Portainer stack
+# =============================================================================
+# Deploy: Portainer > Stacks > Add stack > Repository, point it at this repo,
+# then fill the "Environment variables" pane using .env.example as the list.
+# Variables are referenced explicitly below (rather than via env_file) so a
+# Portainer git-backed stack works without a .env file on disk.
+#
+# Nothing is published to the host. cloudflared joins the "edge" network and
+# reaches the web container by service name, so the helpdesk is never exposed
+# on a LAN port. See docs/cloudflare-tunnel.md.
+# =============================================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-hardened: &hardened
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  restart: unless-stopped
+  logging: *default-logging
+
+# Shared application configuration. Secrets come from the stack environment;
+# none of them have defaults, so a missing value fails loudly at boot.
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-prod}
+  APP_SECRET: ${APP_SECRET:?APP_SECRET is required}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?PUBLIC_BASE_URL is required}
+  CORS_ORIGINS: ${CORS_ORIGINS:-}
+  DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+  BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+  BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+  REQUIRE_MFA_FOR_AGENTS: ${REQUIRE_MFA_FOR_AGENTS:-true}
+  SESSION_IDLE_TIMEOUT_MINUTES: ${SESSION_IDLE_TIMEOUT_MINUTES:-120}
+  SESSION_ABSOLUTE_TIMEOUT_HOURS: ${SESSION_ABSOLUTE_TIMEOUT_HOURS:-12}
+  SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USERNAME: ${SMTP_USERNAME:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_SECURITY: ${SMTP_SECURITY:-starttls}
+  SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Helpdesk}
+  SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+  SMTP_REPLY_TO_EMAIL: ${SMTP_REPLY_TO_EMAIL:-}
+  INBOUND_EMAIL_ENABLED: ${INBOUND_EMAIL_ENABLED:-false}
+  IMAP_HOST: ${IMAP_HOST:-}
+  IMAP_PORT: ${IMAP_PORT:-993}
+  IMAP_USERNAME: ${IMAP_USERNAME:-}
+  IMAP_PASSWORD: ${IMAP_PASSWORD:-}
+  IMAP_USE_SSL: ${IMAP_USE_SSL:-true}
+  IMAP_FOLDER: ${IMAP_FOLDER:-INBOX}
+  IMAP_PROCESSED_FOLDER: ${IMAP_PROCESSED_FOLDER:-}
+  IMAP_POLL_SECONDS: ${IMAP_POLL_SECONDS:-60}
+  ATTACHMENT_DIR: /data/attachments
+  MAX_ATTACHMENT_MB: ${MAX_ATTACHMENT_MB:-25}
+  MAX_EMAIL_MB: ${MAX_EMAIL_MB:-40}
+  TRUST_CLOUDFLARE_HEADERS: ${TRUST_CLOUDFLARE_HEADERS:-true}
+  CF_ACCESS_ENABLED: ${CF_ACCESS_ENABLED:-false}
+  CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:-}
+  CF_ACCESS_AUD: ${CF_ACCESS_AUD:-}
+
+services:
+  db:
+    <<: *hardened
+    image: postgres:16-alpine
+    container_name: helpdesk-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-helpdesk}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+    # Postgres needs these back to drop privileges to the postgres user.
+    cap_add:
+      - CHOWN
+      - DAC_READ_SEARCH
+      - FOWNER
+      - SETGID
+      - SETUID
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  api:
+    <<: *hardened
+    build:
+      context: ./backend
+    image: jward-helpdesk-api:latest
+    container_name: helpdesk-api
+    environment:
+      <<: *app-env
+      HELPDESK_ROLE: api
+    volumes:
+      - attachments:/data/attachments
+    # No egress: the API never makes outbound connections. All mail I/O is the
+    # worker's job, handed over through the outbound_emails table.
+    networks:
+      - internal
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Polls IMAP, turns mail into tickets/replies, and flushes the outbound queue.
+  # Separate container so a slow or unreachable mailbox never stalls the API.
+  worker:
+    <<: *hardened
+    build:
+      context: ./backend
+    image: jward-helpdesk-api:latest
+    container_name: helpdesk-worker
+    command: ["python", "-m", "app.workers.mail_worker"]
+    environment:
+      <<: *app-env
+      HELPDESK_ROLE: worker
+    volumes:
+      - attachments:/data/attachments
+    # "egress" is what lets this one container reach your mail provider.
+    networks:
+      - internal
+      - egress
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Serves the built SPA and reverse-proxies /api to the api container.
+  web:
+    <<: *hardened
+    build:
+      context: ./frontend
+    image: jward-helpdesk-web:latest
+    container_name: helpdesk-web
+    # Both attached networks are internal, so the SPA host has no egress either.
+    networks:
+      - internal
+      - edge
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Optional: run the tunnel inside this stack.
+  #   docker compose --profile tunnel up -d
+  # Already have a cloudflared container? Leave this disabled, attach yours to
+  # the "edge" network, and point the public hostname at http://helpdesk-web:8080
+  cloudflared:
+    <<: *hardened
+    image: cloudflare/cloudflared:latest
+    container_name: helpdesk-tunnel
+    profiles: ["tunnel"]
+    command: ["tunnel", "--no-autoupdate", "run", "--token", "${CLOUDFLARE_TUNNEL_TOKEN:-}"]
+    networks:
+      - edge
+      - egress
+    depends_on:
+      - web
+
+volumes:
+  db-data:
+  attachments:
+
+networks:
+  # Database + application traffic. internal:true means no route off the host.
+  internal:
+    internal: true
+  # Tunnel <-> web only.
+  edge:
+    internal: true
+  # The one network with outbound access, shared by the worker and the tunnel.
+  egress:
