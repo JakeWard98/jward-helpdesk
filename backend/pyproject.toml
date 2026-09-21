@@ -1,0 +1,24 @@
+[project]
+name = "jward-helpdesk"
+version = "0.1.0"
+description = "Self-hosted helpdesk with email ticketing"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "C4", "SIM"]
+ignore = ["S101", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Put backend/ on sys.path so `pytest` finds the `app` package. Without this
+# only `python -m pytest` works, because that form adds the working directory
+# itself - and CI runs the bare command.
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]
