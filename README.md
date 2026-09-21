@@ -124,12 +124,21 @@ tunnelled deployment with it.
 ## Docker images
 
 Published to GitHub Container Registry with `linux/amd64` and `linux/arm64`
-support. Two images cover the three application services — `api` and `worker`
-share one image and differ only by `HELPDESK_ROLE` and the command:
+support. Both come from the root [`Dockerfile`](Dockerfile), one build target
+each, and cover the three application services — `api` and `worker` share an
+image and differ only by `HELPDESK_ROLE` and the command:
 
 ```bash
 docker pull ghcr.io/jakeward98/jward-helpdesk-api:latest   # api + worker
 docker pull ghcr.io/jakeward98/jward-helpdesk-web:latest   # web
+```
+
+Building either one by hand takes the repo root as the context, since the one
+Dockerfile reaches into both `backend/` and `frontend/`:
+
+```bash
+docker build --target api -t jward-helpdesk-api .
+docker build --target web -t jward-helpdesk-web .
 ```
 
 The `attachments` volume (`/data/attachments`, shared by `api` and `worker`)
@@ -244,6 +253,7 @@ backend/           FastAPI application
   tests/           124 tests, no containers needed
 frontend/          React + TypeScript SPA, served by nginx
 docs/              deployment, email, security hardening, Cloudflare tunnel
+Dockerfile         both images: --target api, --target web
 docker-compose.yml Portainer stack
 ```
 

@@ -39,12 +39,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The api and worker containers share one image; compose picks the
-          # role with HELPDESK_ROLE and the worker overrides the command.
+          # Both images come from the root Dockerfile, one target each. The api
+          # and worker containers share an image; compose picks the role with
+          # HELPDESK_ROLE and the worker overrides the command.
           - image: jward-helpdesk-api
-            context: backend
+            target: api
           - image: jward-helpdesk-web
-            context: frontend
+            target: web
     steps:
       - uses: actions/checkout@v4
         with:
@@ -91,7 +92,8 @@ jobs:
         id: push
         uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.context }}
+          context: .
+          target: ${{ matrix.target }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

@@ -101,7 +101,8 @@ services:
   api:
     <<: *hardened
     build:
-      context: ./backend
+      context: .
+      target: api
     image: jward-helpdesk-api:latest
     container_name: helpdesk-api
     environment:
@@ -128,7 +129,8 @@ services:
   worker:
     <<: *hardened
     build:
-      context: ./backend
+      context: .
+      target: api
     image: jward-helpdesk-api:latest
     container_name: helpdesk-worker
     command: ["python", "-m", "app.workers.mail_worker"]
@@ -151,7 +153,8 @@ services:
   web:
     <<: *hardened
     build:
-      context: ./frontend
+      context: .
+      target: web
     image: jward-helpdesk-web:latest
     container_name: helpdesk-web
     networks:
