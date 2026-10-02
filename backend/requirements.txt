@@ -13,4 +13,4 @@ segno==1.6.1
 nh3==0.2.20
 imapclient==3.0.1
 httpx==0.28.1
-PyJWT[crypto]==2.13.0
+PyJWT[crypto]==2.15.0
